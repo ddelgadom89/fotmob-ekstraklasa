@@ -23,6 +23,7 @@ STATS = [
     "expected_assists",
     "goal_assist",
     "big_chance_created",
+    "goals_per_90",
 ]
 
 HEADERS = {
@@ -72,8 +73,16 @@ def get_stat(stat):
         raise ValueError("statsData no encontrado")
     df = pd.DataFrame(stats_data)
 
-    df[stat] = df["statValue"].apply(lambda x: x.get("value") if isinstance(x, dict) else None)
-    return df[["id", "name", "teamId", "position", stat]]
+    get_val = lambda x: x.get("value") if isinstance(x, dict) else None
+    df[stat] = df["statValue"].apply(get_val)
+    cols = ["id", "name", "teamId", "position", stat]
+
+    # En las métricas por 90, el valor secundario suele ser el dato base (p. ej. minutos)
+    if stat.endswith("_per_90") and "substatValue" in df.columns:
+        df[f"{stat}_sub"] = df["substatValue"].apply(get_val)
+        cols.append(f"{stat}_sub")
+
+    return df[cols]
 
 
 def main():
