@@ -24,6 +24,7 @@ STATS = [
     "goal_assist",
     "big_chance_created",
     "goals_per_90",
+    "expected_goals_per_90",
 ]
 
 HEADERS = {
