@@ -26,13 +26,32 @@ STATS = [
 ]
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                  "(KHTML, like Gecko) Chrome/126.0 Safari/537.36",
+    # Mismo User-Agent que funcionó en Colab
+    "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_3_2 like Mac OS X) "
+                  "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.3.1 "
+                  "Mobile/15E148 Safari/604.1",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "es-ES,es;q=0.9",
 }
 
 PATTERN = r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>'
+
+
+def find_key(obj, key):
+    """Busca una clave en cualquier nivel del JSON."""
+    if isinstance(obj, dict):
+        if key in obj and obj[key]:
+            return obj[key]
+        for v in obj.values():
+            found = find_key(v, key)
+            if found:
+                return found
+    elif isinstance(obj, list):
+        for v in obj:
+            found = find_key(v, key)
+            if found:
+                return found
+    return None
 
 
 def get_stat(stat):
@@ -46,7 +65,12 @@ def get_stat(stat):
         raise ValueError(f"No se encontró __NEXT_DATA__ para {stat}")
 
     page_props = json.loads(match.group(1))["props"]["pageProps"]
-    df = pd.DataFrame(page_props["statsData"])
+    stats_data = find_key(page_props, "statsData")
+    if not stats_data:
+        print(f"   [debug] claves pageProps: {list(page_props.keys())}")
+        print(f"   [debug] URL final: {r.url}")
+        raise ValueError("statsData no encontrado")
+    df = pd.DataFrame(stats_data)
 
     df[stat] = df["statValue"].apply(lambda x: x.get("value") if isinstance(x, dict) else None)
     return df[["id", "name", "teamId", "position", stat]]
