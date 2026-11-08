@@ -14,7 +14,11 @@ import pandas as pd
 from curl_cffi import requests
 
 LEAGUE_ID = 196  # Ekstraklasa
-GK_KEYS = ("save", "prevent", "clean", "conceded", "keeper", "xgot")  # categorías de portero
+GK_STATS = [  # categorías de portero en FotMob
+    "_goals_prevented", "_save_percentage", "saves", "clean_sheet", "goals_conceded",
+    "penalty_save", "total_keeper_sweeper", "total_high_claim",
+]
+SOLO_PORTEROS = ["saves", "_save_percentage", "_goals_prevented"]  # quien aparece aquí es portero
 OUT_DIR = "data"
 
 s = requests.Session(impersonate="chrome")
@@ -58,8 +62,7 @@ def main():
     stats = {u.rsplit("/", 1)[-1].replace(".json", ""): u for u in urls if "/stats/" in u}
     print("Categorías disponibles:", sorted(stats))
 
-    gk_stats = {k: u for k, u in stats.items()
-                if any(key in k.lower() for key in GK_KEYS) and not k.endswith("_team")}
+    gk_stats = {k: u for k, u in stats.items() if k in GK_STATS}
     print("Categorías de portero:", sorted(gk_stats))
     if not gk_stats:
         raise SystemExit("No hay categorías de portero: revisa la lista de arriba.")
@@ -83,6 +86,8 @@ def main():
         time.sleep(1)
 
     largo = pd.DataFrame(filas)
+    porteros = set(largo.loc[largo["stat"].isin(SOLO_PORTEROS), "player_id"])
+    largo = largo[largo["player_id"].isin(porteros)]
     base = (largo.sort_values("minutes", ascending=False)
                  .drop_duplicates("player_id")[["player_id", "player", "team_id", "team",
                                                 "minutes", "matches"]])
