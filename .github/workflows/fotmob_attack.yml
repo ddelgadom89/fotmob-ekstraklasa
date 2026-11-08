@@ -1,0 +1,35 @@
+name: FotMob ataque Ekstraklasa
+
+on:
+  schedule:
+    - cron: "30 7 * * 2"   # martes 07:30 UTC (después de jugadores y porteros)
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Instalar dependencias
+        run: pip install curl_cffi pandas
+
+      - name: Scraping FotMob ataque
+        run: python fotmob_attack.py
+
+      - name: Commit de los CSV
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
+          git add data/fotmob_attack_*.csv
+          git diff --staged --quiet && exit 0
+          git commit -m "FotMob ataque $(date +'%Y-%m-%d')"
+          git pull --rebase
+          git push
