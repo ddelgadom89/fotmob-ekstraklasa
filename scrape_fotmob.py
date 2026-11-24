@@ -1,22 +1,24 @@
 # =============================================================================
 # Scraping automático FotMob - Ekstraklasa (estadísticas de jugadores)
 # Se ejecuta solo con GitHub Actions y guarda el CSV en data/
+#
+# v2 (nov 2026): FotMob ya no incluye __NEXT_DATA__ en las páginas de stats,
+# así que se usa la API JSON (mismo método que fotmob_attack.py). Ventajas:
+#   - no depende del HTML de la web
+#   - la temporada se detecta sola (no hay SEASON_ID fijo)
+# El CSV de salida mantiene exactamente las mismas columnas que antes.
 # =============================================================================
 
 import os
-import re
-import json
 import time
 from datetime import date
 
-import requests
 import pandas as pd
+from curl_cffi import requests  # imita un navegador real
 
 LEAGUE_ID = 196        # Ekstraklasa
-SEASON_ID = 37304      # Temporada actual
+OUT_DIR = "data"
 
-# Slugs de estadísticas: cópialos de la URL de FotMob al cambiar de pestaña
-# (.../players/<slug>/ekstraklasa-players)
 STATS = [
     "expected_goals",
     "goals",
@@ -27,85 +29,119 @@ STATS = [
     "expected_goals_per_90",
 ]
 
-HEADERS = {
-    # Mismo User-Agent que funcionó en Colab
-    "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_3_2 like Mac OS X) "
-                  "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.3.1 "
-                  "Mobile/15E148 Safari/604.1",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "es-ES,es;q=0.9",
-}
-
-PATTERN = r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>'
+s = requests.Session(impersonate="chrome")
 
 
-def find_key(obj, key):
-    """Busca una clave en cualquier nivel del JSON."""
+def buscar_urls(obj, out):
+    """Recoge todas las URLs 'fetchAllUrl' de estadísticas del JSON de la liga."""
     if isinstance(obj, dict):
-        if key in obj and obj[key]:
-            return obj[key]
+        if isinstance(obj.get("fetchAllUrl"), str):
+            out.add(obj["fetchAllUrl"])
         for v in obj.values():
-            found = find_key(v, key)
-            if found:
-                return found
+            buscar_urls(v, out)
     elif isinstance(obj, list):
         for v in obj:
-            found = find_key(v, key)
-            if found:
-                return found
+            buscar_urls(v, out)
+    return out
+
+
+def datos_liga():
+    for url in (f"https://www.fotmob.com/api/data/leagues?id={LEAGUE_ID}",
+                f"https://www.fotmob.com/api/leagues?id={LEAGUE_ID}"):
+        r = s.get(url, timeout=30)
+        print(f"{r.status_code} {url}")
+        if r.status_code == 200:
+            try:
+                return r.json()
+            except ValueError:
+                pass
+    raise SystemExit("No se pudo leer la API de la liga en FotMob.")
+
+
+def posicion_de(p):
+    for k in ("Positions", "Position", "PositionId", "position", "positionId"):
+        v = p.get(k)
+        if isinstance(v, list):
+            v = v[0] if v else None
+        if v not in (None, ""):
+            try:
+                return int(v)
+            except (TypeError, ValueError):
+                return None
     return None
 
 
-def get_stat(stat):
-    url = (f"https://www.fotmob.com/es/leagues/{LEAGUE_ID}/stats/season/"
-           f"{SEASON_ID}/players/{stat}/ekstraklasa-players")
-    r = requests.get(url, headers=HEADERS, timeout=20)
-    r.raise_for_status()
-
-    match = re.search(PATTERN, r.text, re.DOTALL | re.IGNORECASE)
-    if not match:
-        raise ValueError(f"No se encontró __NEXT_DATA__ para {stat}")
-
-    page_props = json.loads(match.group(1))["props"]["pageProps"]
-    stats_data = find_key(page_props, "statsData")
-    if not stats_data:
-        print(f"   [debug] claves pageProps: {list(page_props.keys())}")
-        print(f"   [debug] URL final: {r.url}")
-        raise ValueError("statsData no encontrado")
-    df = pd.DataFrame(stats_data)
-
-    get_val = lambda x: x.get("value") if isinstance(x, dict) else None
-    df[stat] = df["statValue"].apply(get_val)
-    cols = ["id", "name", "teamId", "position", stat]
-
-    # En las métricas por 90, el valor secundario suele ser el dato base (p. ej. minutos)
-    if stat.endswith("_per_90") and "substatValue" in df.columns:
-        df[f"{stat}_sub"] = df["substatValue"].apply(get_val)
-        cols.append(f"{stat}_sub")
-
-    return df[cols]
+def posiciones_previas():
+    path = f"{OUT_DIR}/ekstraklasa_players.csv"
+    if not os.path.exists(path):
+        return {}
+    d = pd.read_csv(path, encoding="utf-8-sig")
+    if "id" in d and "position" in d:
+        return d.dropna(subset=["position"]).set_index("id")["position"].astype(int).to_dict()
+    return {}
 
 
 def main():
-    frames = []
-    for stat in STATS:
-        try:
-            df = get_stat(stat)
-            frames.append(df.set_index(["id", "name", "teamId", "position"]))
-            print(f"OK  {stat}: {len(df)} jugadores")
-        except Exception as e:
-            print(f"ERR {stat}: {e}")
-        time.sleep(2)  # pausa para no saturar FotMob
-
-    if not frames:
+    urls = buscar_urls(datos_liga(), set())
+    disponibles = {u.rsplit("/", 1)[-1].replace(".json", ""): u for u in urls if "/stats/" in u}
+    sel = {k: u for k, u in disponibles.items() if k in STATS}
+    print("Encontradas:", sorted(sel))
+    print("No encontradas:", sorted(set(STATS) - set(sel)))
+    if not sel:
         raise SystemExit("No se pudo descargar ninguna estadística")
 
-    players = pd.concat(frames, axis=1).reset_index()
+    filas = []
+    for stat, url in sel.items():
+        try:
+            j = s.get(url, timeout=30).json()
+        except Exception as e:
+            print(f"ERR {stat}: {e}")
+            continue
+        n = 0
+        for lista in j.get("TopLists", []):
+            for p in lista.get("StatList", []):
+                filas.append({
+                    "id": p.get("ParticiantId") or p.get("ParticipantId"),
+                    "name": p.get("ParticipantName"),
+                    "teamId": p.get("TeamId"),
+                    "position": posicion_de(p),
+                    "minutes": p.get("MinutesPlayed") or 0,
+                    "stat": stat,
+                    "value": p.get("StatValue"),
+                    "sub": p.get("SubStatValue"),
+                })
+                n += 1
+        print(f"OK  {stat}: {n} jugadores")
+        time.sleep(1)
+
+    if not filas:
+        raise SystemExit("No se pudo descargar ninguna estadística")
+
+    largo = pd.DataFrame(filas)
+    base = (largo.sort_values("minutes", ascending=False)
+                 .drop_duplicates("id")[["id", "name", "teamId"]])
+    pos = largo.dropna(subset=["position"]).drop_duplicates("id").set_index("id")["position"]
+    base["position"] = base["id"].map(pos).fillna(base["id"].map(posiciones_previas())).astype("Int64")
+
+    valores = largo.pivot_table(index="id", columns="stat", values="value", aggfunc="first")
+    players = base.merge(valores, on="id", how="left")
+    # En las métricas por 90 se guarda también el valor secundario (igual que antes)
+    for stat in [x for x in STATS if x.endswith("_per_90") and x in sel]:
+        sub = largo[largo.stat == stat].drop_duplicates("id").set_index("id")["sub"]
+        players[f"{stat}_sub"] = players["id"].map(sub)
+
+    orden = ["id", "name", "teamId", "position"]
+    for stat in STATS:
+        if stat in players:
+            orden.append(stat)
+        if f"{stat}_sub" in players:
+            orden.append(f"{stat}_sub")
+    players = players[orden]
     players["updated"] = date.today().isoformat()
 
-    os.makedirs("data/history", exist_ok=True)
-    players.to_csv("data/ekstraklasa_players.csv", index=False, encoding="utf-8-sig")
-    players.to_csv(f"data/history/ekstraklasa_players_{date.today()}.csv",
+    os.makedirs(f"{OUT_DIR}/history", exist_ok=True)
+    players.to_csv(f"{OUT_DIR}/ekstraklasa_players.csv", index=False, encoding="utf-8-sig")
+    players.to_csv(f"{OUT_DIR}/history/ekstraklasa_players_{date.today()}.csv",
                    index=False, encoding="utf-8-sig")
     print(f"Guardado: {len(players)} jugadores")
 
